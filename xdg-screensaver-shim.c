@@ -246,7 +246,7 @@ bool operationSuspend(const char *prog, Window window) {
         cleanReturn(false);
     }
     // Monitor X events for destruction of window (BadWindow error if window invalid)
-    XSelectInput(d->display, window, SubstructureNotifyMask);
+    XSelectInput(d->display, window, StructureNotifyMask);
     // Flush requests and handle errors (esp. BadWindow)
     XSync(d->display, false);
     // Prepare select
