@@ -261,6 +261,15 @@ bool operationSuspend(const char *prog, Window window) {
         exit(EXIT_SUCCESS);
     }
     while (true) {
+        // Flush X requests and handle pending events (required before select)
+        while (XPending(d->display) > 0) {
+            XEvent ev;
+            XNextEvent(d->display, &ev);
+            if (ev.type == DestroyNotify && ev.xdestroywindow.event == window) {
+                fprintf(stderr, "Window 0x%lx destroyed\n", window);
+                cleanReturn(true);
+            }
+        }
         readFdSet = activeFdSet;
         if (select(FD_SETSIZE, &readFdSet, NULL, NULL, NULL) < 0) {
             fprintf(stderr, "Failed to block on file descriptors: %s\n", strerror(errno));
@@ -275,14 +284,6 @@ bool operationSuspend(const char *prog, Window window) {
             fprintf(stderr, "Received signal %d (%s)\n", siginfo.ssi_signo,
                     strsignal((int)siginfo.ssi_signo));
             cleanReturn(siginfo.ssi_signo == SIGTERM);
-        }
-        if (FD_ISSET(xServerFd, &readFdSet)) {
-            XEvent ev;
-            XNextEvent(d->display, &ev);
-            if (ev.type == DestroyNotify && ev.xdestroywindow.event == window) {
-                fprintf(stderr, "Window 0x%lx destroyed\n", window);
-                cleanReturn(true);
-            }
         }
     }
 cleanReturn:
