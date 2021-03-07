@@ -28,6 +28,7 @@
 #include <sys/signalfd.h>
 #include <dbus/dbus.h>
 #include <X11/Xlib.h>
+#include <X11/Xlibint.h>
 #include "project-config.h"
 
 const int EXIT_SIGNALS[] = {SIGHUP, SIGINT, SIGPIPE, SIGQUIT, SIGTERM, 0};
@@ -43,7 +44,7 @@ bool allocSprintf(char **returnStr, const char *format, ...) {
     int strLen = vsnprintf(NULL, 0, format, ap);
     va_end(ap);
     if (strLen < 0) {
-        fprintf(stderr, "Unexpected snprintf error encountered\n");
+        fprintf(stderr, "Unexpected vsnprintf error encountered\n");
         cleanReturn(false);
     }
     size_t size = (size_t)strLen + NULL_BYTE_LEN;
@@ -55,7 +56,7 @@ bool allocSprintf(char **returnStr, const char *format, ...) {
     int strLen2 = vsnprintf(str, size, format, ap);
     va_end(ap);
     if (strLen != strLen2) {
-        fprintf(stderr, "Unexpected snprintf error encountered\n");
+        fprintf(stderr, "Unexpected vsnprintf error encountered\n");
         cleanReturn(false);
     }
 cleanReturn:
@@ -140,14 +141,28 @@ unInhibitScreenSaverEnd:
         close(d->signalFd);
     }
     if (d->display != NULL) {
+        // Unset custom X error handlers because they call this function
         XSetErrorHandler(NULL);
+        XSetIOErrorHandler(NULL);
         XCloseDisplay(d->display);
     }
     return returnValue;
 }
 
+// X Error Handler that calls operationSuspendFinish before exiting
 int operationSuspendXErrorHandler(Display *display, XErrorEvent *ev) {
-    exit(operationSuspendFinish() ? EXIT_SUCCESS : EXIT_FAILURE);
+    operationSuspendData.display = NULL; // don't free display structure
+    operationSuspendFinish();
+    _XDefaultError(display, ev); // may not return
+    exit(EXIT_FAILURE);
+}
+
+// X IO Error Handler that calls operationSuspendFinish before exiting
+int operationSuspendXIOErrorHandler(Display *display) {
+    operationSuspendData.display = NULL; // don't free display structure
+    operationSuspendFinish();
+    _XDefaultIOError(display); // may not return
+    exit(EXIT_FAILURE);
 }
 
 bool operationSuspend(const char *prog, Window window) {
@@ -221,16 +236,19 @@ bool operationSuspend(const char *prog, Window window) {
         fprintf(stderr, "Unexpected D-Bus reply\n");
         cleanReturn(false);
     }
+    // Set custom X error handlers
+    XSetErrorHandler(operationSuspendXErrorHandler);
+    XSetIOErrorHandler(operationSuspendXIOErrorHandler);
     // Init X
     d->display = XOpenDisplay(NULL);
     if (d->display == NULL) {
         fprintf(stderr, "Failed to open X display\n");
         cleanReturn(false);
     }
-    // Monitor X events for destruction of window
+    // Monitor X events for destruction of window (BadWindow error if window invalid)
     XSelectInput(d->display, window, SubstructureNotifyMask);
-    // Handle BadWindow error if window does not exist
-    XSetErrorHandler(operationSuspendXErrorHandler);
+    // Flush requests and handle errors (esp. BadWindow)
+    XSync(d->display, false);
     // Prepare select
     int xServerFd = XConnectionNumber(d->display);
     fd_set activeFdSet, readFdSet;
@@ -240,12 +258,12 @@ bool operationSuspend(const char *prog, Window window) {
     // Fork into background
     if (fork() != 0) {
         // Terminate immediately without cleanup
-        _exit(EXIT_SUCCESS);
+        exit(EXIT_SUCCESS);
     }
     while (true) {
         readFdSet = activeFdSet;
         if (select(FD_SETSIZE, &readFdSet, NULL, NULL, NULL) < 0) {
-            fprintf(stderr, "Failed to block on sockets: %s\n", strerror(errno));
+            fprintf(stderr, "Failed to block on file descriptors: %s\n", strerror(errno));
             cleanReturn(false);
         }
         if (FD_ISSET(d->signalFd, &readFdSet)) {
@@ -256,14 +274,14 @@ bool operationSuspend(const char *prog, Window window) {
             }
             fprintf(stderr, "Received signal %d (%s)\n", siginfo.ssi_signo,
                     strsignal((int)siginfo.ssi_signo));
-            fprintf(stderr, "Terminating\n");
-            cleanReturn(false);
+            cleanReturn(siginfo.ssi_signo == SIGTERM);
         }
         if (FD_ISSET(xServerFd, &readFdSet)) {
             XEvent ev;
             XNextEvent(d->display, &ev);
             if (ev.type == DestroyNotify && ev.xdestroywindow.event == window) {
-                break;
+                fprintf(stderr, "Window 0x%lx destroyed\n", window);
+                cleanReturn(true);
             }
         }
     }
