@@ -1,5 +1,5 @@
 project('xdg-screensaver-shim', 'c',
-        version: '0.0.1')
+        version: '0.0.2')
 
 conf_data = configuration_data()
 conf_data.set('VERSION', '"' + meson.project_version() + '"')
